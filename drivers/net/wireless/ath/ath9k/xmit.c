@@ -17,7 +17,7 @@
 #include <linux/dma-mapping.h>
 #include "ath9k.h"
 #include "ar9003_mac.h"
-
+#include <linux/atomic.h>//Khai báo thư viện sử dụng biến đếm
 #define BITS_PER_BYTE           8
 #define OFDM_PLCP_BITS          22
 #define HT_RC_2_STREAMS(_rc)    ((((_rc) & 0x78) >> 3) + 1)
@@ -40,7 +40,9 @@
 #define ATH9K_PWRTBL_11NA_HT_SHIFT      8
 #define ATH9K_PWRTBL_11NG_HT_SHIFT      12
 
-
+// Khai báo biến đếm an toàn 
+static atomic_t dbg_tx_packets_total = ATOMIC_INIT(0);
+static atomic_t dbg_tx_packets_dropped = ATOMIC_INIT(0);
 static u16 bits_per_symbol[][2] = {
 	/* 20MHz 40MHz */
 	{    26,   54 },     /*  0: BPSK */
@@ -2020,6 +2022,9 @@ void ath_tx_cleanupq(struct ath_softc *sc, struct ath_txq *txq)
 {
 	ath9k_hw_releasetxqueue(sc->sc_ah, txq->axq_qnum);
 	sc->tx.txqsetup &= ~(1<<txq->axq_qnum);
+	//In kết quả khi dọn dẹp hàng đợi
+	printk(KERN_INFO "ath9k-debug: Queue %d cleaned up. Total dropped packets so far: %d\n",
+		txq->axq_qnum, atomic_read(&dbg_tx_packets_dropped));
 }
 
 /* For each acq entry, for each tid, try to schedule packets
@@ -2421,6 +2426,8 @@ int ath_tx_start(struct ieee80211_hw *hw, struct sk_buff *skb,
 	drop_threshold = ath_txq_get_dynamic_drop_threshold(sc, txq, q, pkt_len);
 	if (drop_threshold && txq->axq_depth >= drop_threshold) {
 		txq->axq_dropped++;
+		//Biến toàn cục để an toàn trên hệ thống đa nhân
+		atomic_inc(&dbg_tx_packets_dropped);
 		ath_txq_unlock(sc, txq);
 		dev_kfree_skb_any(skb);
 		return 0;
