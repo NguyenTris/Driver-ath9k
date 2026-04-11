@@ -224,6 +224,7 @@ struct ath_buf_state {
 	bool stale;
 	u16 seqno;
 	unsigned long bfs_paprd_timestamp;
+	ktime_t dbg_time;//thời gian bắt đầu
 };
 
 struct ath_buf {

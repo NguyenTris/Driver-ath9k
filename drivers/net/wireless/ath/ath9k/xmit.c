@@ -18,6 +18,7 @@
 #include "ath9k.h"
 #include "ar9003_mac.h"
 #include <linux/atomic.h>//Khai báo thư viện sử dụng biến đếm
+#include <linux/ktime.h>//Khai báo biến thời gian
 #define BITS_PER_BYTE           8
 #define OFDM_PLCP_BITS          22
 #define HT_RC_2_STREAMS(_rc)    ((((_rc) & 0x78) >> 3) + 1)
@@ -40,9 +41,13 @@
 #define ATH9K_PWRTBL_11NA_HT_SHIFT      8
 #define ATH9K_PWRTBL_11NG_HT_SHIFT      12
 
-// Khai báo biến đếm an toàn 
+// Khai báo biến đếm an toàn //
 static atomic_t dbg_tx_packets_total = ATOMIC_INIT(0);
 static atomic_t dbg_tx_packets_dropped = ATOMIC_INIT(0);
+// Khai báo tham số điều khiển log //
+static int ath9k_debug_log_level = 0;
+module_param_named(debug_log, ath9k_debug_log_level, int, 0644);
+MODULE_PARM_DESC(debug_log, "Bat/Tat log debug cho ath9k (0: Tat, 1: Bat)");
 static u16 bits_per_symbol[][2] = {
 	/* 20MHz 40MHz */
 	{    26,   54 },     /*  0: BPSK */
@@ -2200,6 +2205,13 @@ static void ath_tx_send_normal(struct ath_softc *sc, struct ath_txq *txq,
 	ath_tx_fill_desc(sc, bf, txq, fi->framelen);
 	ath_tx_txqaddbuf(sc, txq, &bf_head, false);
 	TX_STAT_INC(sc, txq->axq_qnum, queued);
+	//Ghi log an toàn với Rate-limiting//
+	if (unlikely(ath9k_debug_log_level > 0)) {
+		pr_info_ratelimited("ath9k-debug: [TX] Queue:%d | Depth:%d | Total_Dropped:%d\n",
+			txq->axq_qnum,
+			txq->axq_depth,
+			atomic_read(&dbg_tx_packets_dropped));
+	}
 }
 
 static void setup_frame_info(struct ieee80211_hw *hw,
@@ -2330,7 +2342,8 @@ static struct ath_buf *ath_tx_setup_buffer(struct ath_softc *sc,
 		ath_tx_return_buffer(sc, bf);
 		return NULL;
 	}
-
+	/* Ghi lại thời điểm bắt đầu (T-start)  */
+	bf->bf_state.dbg_time = ktime_get();
 	fi->bf = bf;
 
 	return bf;
@@ -2611,7 +2624,14 @@ static void ath_tx_complete_buf(struct ath_softc *sc, struct ath_buf *bf,
 
 	if (ts->ts_status & ATH9K_TXERR_FILT)
 		tx_info->flags |= IEEE80211_TX_STAT_TX_FILTERED;
+	/* Lấy thời điểm kết thúc và tính toán */
+	ktime_t finish_time = ktime_get();
+	s64 latency_us = ktime_to_ns(ktime_sub(finish_time, bf->bf_state.dbg_time)) / 1000;
 
+	if (unlikely(ath9k_debug_log_level > 0)) {
+		pr_info_ratelimited("ath9k-debug: [LATENCY] Skb:%p | Latency:%lld us\n",
+			skb, latency_us);
+	}
 	dma_unmap_single(sc->dev, bf->bf_buf_addr, skb->len, DMA_TO_DEVICE);
 	bf->bf_buf_addr = 0;
 	if (sc->tx99_state)
