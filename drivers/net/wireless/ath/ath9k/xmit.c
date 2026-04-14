@@ -2416,6 +2416,14 @@ int ath_tx_start(struct ieee80211_hw *hw, struct sk_buff *skb,
 
 	if (ps_resp)
 		txq = sc->tx.uapsdq;
+	/*Điểm vết trong xmit.c hàm ath_tx_start*/
+	if (txq->axq_depth >= ATH_TX_QUEUE_LIMIT) {
+    	txq->stat_drop_count++;
+    	pr_info_ratelimited("ATH9K_DBG: Drop at Queue %d, Total: %u\n", 
+                        txq->mac80211_macqnum, txq->stat_drop_count);
+    	dev_kfree_skb_any(skb);
+    	return;
+	}
 
 	ath_txq_lock(sc, txq);
 	drop_threshold = ath_txq_get_dynamic_drop_threshold(sc, txq, q, pkt_len);

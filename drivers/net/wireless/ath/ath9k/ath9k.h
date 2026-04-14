@@ -179,6 +179,10 @@ struct ath_txq {
 	u8 txq_tailidx;
 	int pending_frames;
 	struct sk_buff_head complete_q;
+
+	/*bổ sung thống kê*/
+	u32 stat_drop_count;	/*Tổng số gói tin bị loại bỏ*/
+	u32 stat_peak_depth;	/*Độ sâu nhất của hàng đợi*/
 };
 
 struct ath_frame_info {
