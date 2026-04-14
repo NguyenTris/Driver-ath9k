@@ -8,7 +8,7 @@ sudo apt-get install build-essential linux-headers-$(uname -r)<br>
 <br>
 #Tải mã nguồn từ GitHub cá nhân đã được debug<br>
 git clone https://github.com/NguyenTris/Driver-ath9k.git<br>
-cd ath9k-debug<br>
+cd drivers\net\wireless\ath\ath9k<br>
 <br>
 #Biên dịch và cài đặt module<br>
 make -C /lib/modules/$(uname -r)/build M=$(PWD) modules		#biên dịch<br>
