@@ -17,7 +17,8 @@
 #include <linux/dma-mapping.h>
 #include "ath9k.h"
 #include "ar9003_mac.h"
-
+#include <linux/atomic.h>//Khai báo thư viện sử dụng biến đếm
+#include <linux/ktime.h>//Khai báo biến thời gian
 #define BITS_PER_BYTE           8
 #define OFDM_PLCP_BITS          22
 #define HT_RC_2_STREAMS(_rc)    ((((_rc) & 0x78) >> 3) + 1)
@@ -40,7 +41,13 @@
 #define ATH9K_PWRTBL_11NA_HT_SHIFT      8
 #define ATH9K_PWRTBL_11NG_HT_SHIFT      12
 
-
+// Khai báo biến đếm an toàn //
+static atomic_t dbg_tx_packets_total = ATOMIC_INIT(0);
+static atomic_t dbg_tx_packets_dropped = ATOMIC_INIT(0);
+// Khai báo tham số điều khiển log //
+static int ath9k_debug_log_level = 0;
+module_param_named(debug_log, ath9k_debug_log_level, int, 0644);
+MODULE_PARM_DESC(debug_log, "Bat/Tat log debug cho ath9k (0: Tat, 1: Bat)");
 static u16 bits_per_symbol[][2] = {
 	/* 20MHz 40MHz */
 	{    26,   54 },     /*  0: BPSK */
@@ -2020,6 +2027,9 @@ void ath_tx_cleanupq(struct ath_softc *sc, struct ath_txq *txq)
 {
 	ath9k_hw_releasetxqueue(sc->sc_ah, txq->axq_qnum);
 	sc->tx.txqsetup &= ~(1<<txq->axq_qnum);
+	//In kết quả khi dọn dẹp hàng đợi
+	printk(KERN_INFO "ath9k-debug: Queue %d cleaned up. Total dropped packets so far: %d\n",
+		txq->axq_qnum, atomic_read(&dbg_tx_packets_dropped));
 }
 
 /* For each acq entry, for each tid, try to schedule packets
@@ -2196,11 +2206,14 @@ static void ath_tx_send_normal(struct ath_softc *sc, struct ath_txq *txq,
 	bf->bf_lastbf = bf;
 	ath_tx_fill_desc(sc, bf, txq, fi->framelen);
 	ath_tx_txqaddbuf(sc, txq, &bf_head, false);
-	TX_STAT_INC(sc, txq->axq_qnum, queued);
-	
-	/* Log normal send */
-	pr_debug("ATH9K_TX_SEND: Normal packet sent - queue=%d, size=%u, depth=%d\n",
-		txq->axq_qnum, skb->len, txq->axq_depth);
+	TX_STAT_INC(sc, txq->axq_qnum, queued
+	//Ghi log an toàn với Rate-limiting//
+	if (unlikely(ath9k_debug_log_level > 0)) {
+		pr_info_ratelimited("ath9k-debug: [TX] Queue:%d | Depth:%d | Total_Dropped:%d\n", 
+			txq->axq_qnum,
+			txq->axq_depth,
+			atomic_read(&dbg_tx_packets_dropped));
+	}
 }
 
 static void setup_frame_info(struct ieee80211_hw *hw,
@@ -2334,11 +2347,8 @@ static struct ath_buf *ath_tx_setup_buffer(struct ath_softc *sc,
 		ath_tx_return_buffer(sc, bf);
 		return NULL;
 	}
-	
-	/* Log successful DMA setup */
-	pr_debug("ATH9K_TX: DMA mapped - queue=%d, vaddr=%p, paddr=%llx, size=%u\n",
-		txq->axq_qnum, skb->data, (unsigned long long)bf->bf_buf_addr, skb->len);
-
+	/* Ghi lại thời điểm bắt đầu (T-start)  */
+	bf->bf_state.dbg_time = ktime_get();
 	fi->bf = bf;
 
 	return bf;
@@ -2449,8 +2459,8 @@ int ath_tx_start(struct ieee80211_hw *hw, struct sk_buff *skb,
 	drop_threshold = ath_txq_get_dynamic_drop_threshold(sc, txq, q, pkt_len);
 	if (drop_threshold && txq->axq_depth >= drop_threshold) {
 		txq->axq_dropped++;
-		pr_warn_ratelimited("ATH9K_TX_DROP: Dynamic threshold exceeded - Queue=%d, depth=%d >= threshold=%u, dropped count=%u\n",
-			txq->axq_qnum, txq->axq_depth, drop_threshold, txq->axq_dropped);
+		//Biến toàn cục để an toàn trên hệ thống đa nhân
+		atomic_inc(&dbg_tx_packets_dropped);
 		ath_txq_unlock(sc, txq);
 		dev_kfree_skb_any(skb);
 		return 0;
@@ -2653,7 +2663,14 @@ static void ath_tx_complete_buf(struct ath_softc *sc, struct ath_buf *bf,
 
 	if (ts->ts_status & ATH9K_TXERR_FILT)
 		tx_info->flags |= IEEE80211_TX_STAT_TX_FILTERED;
+	/* Lấy thời điểm kết thúc và tính toán */
+	ktime_t finish_time = ktime_get();
+	s64 latency_us = ktime_to_ns(ktime_sub(finish_time, bf->bf_state.dbg_time)) / 1000;
 
+	if (unlikely(ath9k_debug_log_level > 0)) {
+		pr_info_ratelimited("ath9k-debug: [LATENCY] Skb:%p | Latency:%lld us\n",
+			skb, latency_us);
+	}
 	dma_unmap_single(sc->dev, bf->bf_buf_addr, skb->len, DMA_TO_DEVICE);
 	bf->bf_buf_addr = 0;
 	
