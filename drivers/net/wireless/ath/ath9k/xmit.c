@@ -2198,16 +2198,18 @@ static void ath_tx_send_normal(struct ath_softc *sc, struct ath_txq *txq,
 	if (tid && (tx_info->flags & IEEE80211_TX_CTL_AMPDU)) {
 		bf->bf_state.bf_type = BUF_AMPDU;
 		ath_tx_addto_baw(tid, bf);
+		pr_debug("ATH9K_TX: AMPDU frame added - queue=%d, tid=%d\n",
+			txq->axq_qnum, tid->tidno);
 	}
 
 	bf->bf_next = NULL;
 	bf->bf_lastbf = bf;
 	ath_tx_fill_desc(sc, bf, txq, fi->framelen);
 	ath_tx_txqaddbuf(sc, txq, &bf_head, false);
-	TX_STAT_INC(sc, txq->axq_qnum, queued);
+	TX_STAT_INC(sc, txq->axq_qnum, queued
 	//Ghi log an toàn với Rate-limiting//
 	if (unlikely(ath9k_debug_log_level > 0)) {
-		pr_info_ratelimited("ath9k-debug: [TX] Queue:%d | Depth:%d | Total_Dropped:%d\n",
+		pr_info_ratelimited("ath9k-debug: [TX] Queue:%d | Depth:%d | Total_Dropped:%d\n", 
 			txq->axq_qnum,
 			txq->axq_depth,
 			atomic_read(&dbg_tx_packets_dropped));
@@ -2310,6 +2312,7 @@ static struct ath_buf *ath_tx_setup_buffer(struct ath_softc *sc,
 
 	bf = ath_tx_get_buffer(sc);
 	if (!bf) {
+		pr_warn_ratelimited("ATH9K_TX_ERROR: TX buffers are FULL for queue %d\n", txq->axq_qnum);
 		ath_dbg(common, XMIT, "TX buffers are full\n");
 		return NULL;
 	}
@@ -2337,6 +2340,8 @@ static struct ath_buf *ath_tx_setup_buffer(struct ath_softc *sc,
 	if (unlikely(dma_mapping_error(sc->dev, bf->bf_buf_addr))) {
 		bf->bf_mpdu = NULL;
 		bf->bf_buf_addr = 0;
+		pr_err("ATH9K_TX_ERROR: DMA mapping failed for queue %d, size=%u\n",
+			txq->axq_qnum, skb->len);
 		ath_err(ath9k_hw_common(sc->sc_ah),
 			"dma_mapping_error() on TX\n");
 		ath_tx_return_buffer(sc, bf);
@@ -2401,9 +2406,12 @@ static int ath_tx_prepare(struct ieee80211_hw *hw, struct sk_buff *skb,
 
 		skb_push(skb, padsize);
 		memmove(skb->data, skb->data + padsize, padpos);
+		pr_debug("ATH9K_TX: Padding added - padsize=%d, new_len=%u\n",
+			padsize, skb->len);
 	}
 
 	setup_frame_info(hw, sta, skb, frmlen);
+	pr_debug("ATH9K_TX_PREPARE: Frame prepared - len=%u\n", frmlen);
 	return 0;
 }
 
@@ -2434,6 +2442,18 @@ int ath_tx_start(struct ieee80211_hw *hw, struct sk_buff *skb,
 
 	if (ps_resp)
 		txq = sc->tx.uapsdq;
+	
+	/* Log packet transmission info */
+	pr_debug("ATH9K_TX: Start TX - pkt_len=%u, queue=%d, qid=%d, depth=%d\n",
+		 pkt_len, q, txq->axq_qnum, txq->axq_depth);
+	/*Điểm vết trong xmit.c hàm ath_tx_start*/
+	if (txq->axq_depth >= ATH_TX_QUEUE_LIMIT) {
+    	txq->stat_drop_count++;
+    	pr_warn_ratelimited("ATH9K_TX_DROP: Queue %d FULL (depth=%d >= limit=%d), Drop packet (size=%u), Total dropped: %u\n",
+                        txq->axq_qnum, txq->axq_depth, ATH_TX_QUEUE_LIMIT, pkt_len, txq->stat_drop_count);
+    	dev_kfree_skb_any(skb);
+    	return 0;
+	}
 
 	ath_txq_lock(sc, txq);
 	drop_threshold = ath_txq_get_dynamic_drop_threshold(sc, txq, q, pkt_len);
@@ -2469,6 +2489,7 @@ int ath_tx_start(struct ieee80211_hw *hw, struct sk_buff *skb,
 
 	bf = ath_tx_setup_buffer(sc, txq, tid, skb);
 	if (!bf) {
+		pr_err("ATH9K_TX_ERROR: Failed to setup TX buffer for queue %d\n", txq->axq_qnum);
 		ath_txq_skb_done(sc, skb);
 		if (txctl->paprd)
 			dev_kfree_skb_any(skb);
@@ -2476,6 +2497,10 @@ int ath_tx_start(struct ieee80211_hw *hw, struct sk_buff *skb,
 			ieee80211_free_txskb(sc->hw, skb);
 		goto out;
 	}
+	
+	/* Log successful buffer setup */
+	pr_debug("ATH9K_TX: Buffer setup OK - queue=%d, seqno=%u\n",
+		txq->axq_qnum, bf->bf_state.seqno);
 
 	bf->bf_state.bfs_paprd = txctl->paprd;
 
@@ -2483,7 +2508,16 @@ int ath_tx_start(struct ieee80211_hw *hw, struct sk_buff *skb,
 		bf->bf_state.bfs_paprd_timestamp = jiffies;
 
 	ath_set_rates(vif, sta, bf);
+	
+	/* Log packet ready to send */
+	pr_debug("ATH9K_TX: Sending packet - queue=%d, size=%u, pending=%u\n",
+		txq->axq_qnum, pkt_len, txq->pending_frames);
+	
 	ath_tx_send_normal(sc, txq, tid, skb);
+
+	/* Log after sending */
+	pr_debug("ATH9K_TX: Packet queued - queue=%d, new_depth=%d\n",
+		txq->axq_qnum, txq->axq_depth);
 
 out:
 	ath_txq_unlock(sc, txq);
@@ -2577,6 +2611,11 @@ static void ath_tx_complete(struct ath_softc *sc, struct sk_buff *skb,
 			tx_info->flags |= IEEE80211_TX_STAT_NOACK_TRANSMITTED;
 		else
 			tx_info->flags |= IEEE80211_TX_STAT_ACK;
+		pr_debug("ATH9K_TX_COMPLETE: TX successful - size=%u, flags=0x%x\n",
+			skb->len, tx_info->flags);
+	} else {
+		pr_warn_ratelimited("ATH9K_TX_ERROR: TX failed - size=%u, flags=0x%x, tx_flags=0x%x\n",
+			skb->len, tx_info->flags, tx_flags);
 	}
 
 	if (tx_info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS) {
@@ -2634,6 +2673,14 @@ static void ath_tx_complete_buf(struct ath_softc *sc, struct ath_buf *bf,
 	}
 	dma_unmap_single(sc->dev, bf->bf_buf_addr, skb->len, DMA_TO_DEVICE);
 	bf->bf_buf_addr = 0;
+	
+	if (txok)
+		pr_debug("ATH9K_TX_COMPLETE_BUF: DMA unmap OK - queue=%d, size=%u, status=0x%x\n",
+			txq->axq_qnum, skb->len, ts->ts_status);
+	else
+		pr_warn_ratelimited("ATH9K_TX_COMPLETE_BUF: TX error - queue=%d, size=%u, status=0x%x\n",
+			txq->axq_qnum, skb->len, ts->ts_status);
+	
 	if (sc->tx99_state)
 		goto skip_tx_complete;
 
